@@ -1,0 +1,6 @@
+@ShoppingApp_TestTask_HostAddress = http://localhost:5192
+
+GET {{ShoppingApp_TestTask_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
