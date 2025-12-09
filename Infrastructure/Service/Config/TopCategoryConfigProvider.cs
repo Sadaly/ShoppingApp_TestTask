@@ -11,6 +11,7 @@ namespace Infrastructure.Service.Config
     {
         private TopCategoryConfig _current = new();
         private readonly IServiceScopeFactory _scopeFactory;
+        private readonly SemaphoreSlim _lock = new(1, 1);
 
         public TopCategoryConfig CurrentValue => _current;
         public TopCategoryConfig Get(string? name) => _current;
@@ -23,44 +24,52 @@ namespace Infrastructure.Service.Config
 
         public async Task<TopCategoryConfig> CalculateTopCategoryAsync()
         {
-            using var scope = _scopeFactory.CreateScope();
-
-            var _itemRepository = scope.ServiceProvider.GetRequiredService<IItemRepository>();
-            var _purchaseRepository = scope.ServiceProvider.GetRequiredService<IPurchaseRepository>();
-
-            var purchases = await _purchaseRepository.GetAllAsync();
-            if (purchases.Count == 0)
+            await _lock.WaitAsync();
+            try
             {
-                _current = new TopCategoryConfig { TopSellableCategory = ItemCategory.None, AveragePriceInTopCategory = 0 };
-                return new();
+                using var scope = _scopeFactory.CreateScope();
+
+                var _itemRepository = scope.ServiceProvider.GetRequiredService<IItemRepository>();
+                var _purchaseRepository = scope.ServiceProvider.GetRequiredService<IPurchaseRepository>();
+
+                var purchases = await _purchaseRepository.GetAllAsync();
+                if (purchases.Count == 0)
+                {
+                    _current = new TopCategoryConfig { TopSellableCategory = ItemCategory.None, AveragePriceInTopCategory = 0 };
+                    return new();
+                }
+
+                // Группируем по категориям и считаем выручку
+                var categoryRevenue = purchases
+                    .GroupBy(p => p.Item.Category)
+                    .ToDictionary(g => g.Key, g => g.Sum(p => p.Price));
+
+                var topCategory = categoryRevenue
+                    .OrderByDescending(kvp => kvp.Value)
+                    .First().Key;
+
+                // Считаем среднюю цену в топовой категории
+                var items = (await _itemRepository.GetAllAsync())
+                    .Where(i => i.Category == topCategory)
+                    .ToList();
+
+                var avgPrice = items.Count != 0
+                    ? items.Average(i => i.Price)
+                    : 0;
+
+                // Обновляем конфигурацию
+                _current = new TopCategoryConfig
+                {
+                    TopSellableCategory = topCategory,
+                    AveragePriceInTopCategory = avgPrice
+                };
+
+                return _current;
             }
-
-            // Группируем по категориям и считаем выручку
-            var categoryRevenue = purchases
-                .GroupBy(p => p.Item.Category)
-                .ToDictionary(g => g.Key, g => g.Sum(p => p.Price));
-
-            var topCategory = categoryRevenue
-                .OrderByDescending(kvp => kvp.Value)
-                .First().Key;
-
-            // Считаем среднюю цену в топовой категории
-            var items = (await _itemRepository.GetAllAsync())
-                .Where(i => i.Category == topCategory)
-                .ToList();
-
-            var avgPrice = items.Count != 0 
-                ? items.Average(i => i.Price) 
-                : 0;
-
-            // Обновляем конфигурацию
-            _current = new TopCategoryConfig
+            finally
             {
-                TopSellableCategory = topCategory,
-                AveragePriceInTopCategory = avgPrice
-            };
-
-            return _current;
+                _lock.Release();
+            }
         }
 
         private class NullDisposable : IDisposable
